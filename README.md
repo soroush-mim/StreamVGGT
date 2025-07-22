@@ -2,7 +2,7 @@
 <h1>Streaming 4D Visual Geometry Transformer</h1>
 </div>
 
-### [Paper](https://arxiv.org/abs/2507.11539)  | [Project Page](https://wzzheng.net/StreamVGGT) 
+### [Paper](https://arxiv.org/abs/2507.11539)  | [Project Page](https://wzzheng.net/StreamVGGT)  | [Online Demo](https://huggingface.co/spaces/lch01/StreamVGGT)
 
 >Streaming 4D Visual Geometry Transformer
 
