@@ -1,0 +1,10 @@
+output_streamvggt/
+ckpt/
+*/__pycache__/
+*.pyc
+*.mp4
+src/streamvggt/heads/track_modules/__pycache__/__init__.cpython-311.pyc
+src/streamvggt/heads/track_modules/__pycache__/base_track_predictor.cpython-311.pyc
+src/streamvggt/heads/track_modules/__pycache__/blocks.cpython-311.pyc
+src/streamvggt/heads/track_modules/__pycache__/modules.cpython-311.pyc
+src/streamvggt/heads/track_modules/__pycache__/utils.cpython-311.pyc

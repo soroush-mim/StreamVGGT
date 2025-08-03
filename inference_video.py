@@ -1,0 +1,338 @@
+import argparse
+import os
+import cv2
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+import sys
+import glob
+import time
+from datetime import datetime
+
+# Add src to path
+sys.path.append("src/")
+
+from streamvggt.models.streamvggt import StreamVGGT
+from streamvggt.utils.load_fn import load_and_preprocess_images
+from streamvggt.utils.pose_enc import pose_encoding_to_extri_intri
+from streamvggt.utils.geometry import unproject_depth_map_to_point_map
+from visual_util import predictions_to_glb
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+def load_model():
+    """Load StreamVGGT model following the same logic as demo_gradio.py"""
+    print("Initializing and loading StreamVGGT model...")
+    
+    local_ckpt_path = "ckpt/checkpoints.pth"
+    if os.path.exists(local_ckpt_path):
+        print(f"Loading local checkpoint from {local_ckpt_path}")
+        model = StreamVGGT()
+        ckpt = torch.load(local_ckpt_path, map_location="cpu")
+        model.load_state_dict(ckpt, strict=True)
+        model.eval()
+        del ckpt
+    else:
+        print("Local checkpoint not found, downloading from Hugging Face...")
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id="lch01/StreamVGGT",
+            filename="checkpoints.pth",
+            revision="main",
+            force_download=True
+        )
+        model = StreamVGGT()
+        ckpt = torch.load(path, map_location="cpu")
+        model.load_state_dict(ckpt, strict=True)
+        model.eval() 
+        del ckpt
+    
+    return model
+
+def extract_frames_from_video(video_path, output_dir, fps_interval=1):
+    """Extract frames from video following the same logic as demo_gradio.py"""
+    os.makedirs(output_dir, exist_ok=True)
+    
+    vs = cv2.VideoCapture(video_path)
+    fps = vs.get(cv2.CAP_PROP_FPS)
+    frame_interval = int(fps * fps_interval)  # Extract 1 frame per second by default
+    
+    count = 0
+    video_frame_num = 0
+    image_paths = []
+    
+    while True:
+        gotit, frame = vs.read()
+        if not gotit:
+            break
+        count += 1
+        if count % frame_interval == 0:
+            image_path = os.path.join(output_dir, f"{video_frame_num:06}.png")
+            cv2.imwrite(image_path, frame)
+            image_paths.append(image_path)
+            video_frame_num += 1
+    
+    vs.release()
+    return sorted(image_paths)
+
+def run_model_on_images(image_paths, model):
+    """Run the model on images following the same logic as demo_gradio.py"""
+    print(f"Processing {len(image_paths)} images")
+    
+    # Device check
+    if not torch.cuda.is_available():
+        raise ValueError("CUDA is not available. Check your environment.")
+    
+    # Move model to device
+    model = model.to(device)
+    model.eval()
+    
+    # Load and preprocess images using the same function as demo
+    images = load_and_preprocess_images(image_paths).to(device)
+    print(f"Preprocessed images shape: {images.shape}")
+    
+    # Create frames list following the same structure as demo
+    frames = []
+    for i in range(images.shape[0]):
+        image = images[i].unsqueeze(0) 
+        frame = {
+            "img": image
+        }
+        frames.append(frame)
+    
+    # Run inference with same dtype handling as demo
+    print("Running inference...")
+    dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    
+    with torch.no_grad():
+        with torch.cuda.amp.autocast(dtype=dtype):
+            
+            output = model.inference(frames)
+    
+    # Process outputs following the same logic as demo
+    all_pts3d = []
+    all_conf = []
+    all_depth = []
+    all_depth_conf = []
+    all_camera_pose = []
+    
+    for res in output.ress:
+        all_pts3d.append(res['pts3d_in_other_view'].squeeze(0))
+        all_conf.append(res['conf'].squeeze(0))
+        all_depth.append(res['depth'].squeeze(0))
+        all_depth_conf.append(res['depth_conf'].squeeze(0))
+        all_camera_pose.append(res['camera_pose'].squeeze(0))
+    
+    predictions = {}
+    predictions["world_points"] = torch.stack(all_pts3d, dim=0)  # (S, H, W, 3)
+    predictions["world_points_conf"] = torch.stack(all_conf, dim=0)  # (S, H, W)
+    predictions["depth"] = torch.stack(all_depth, dim=0)  # (S, H, W, 1)
+    predictions["depth_conf"] = torch.stack(all_depth_conf, dim=0)  # (S, H, W)
+    predictions["pose_enc"] = torch.stack(all_camera_pose, dim=0)  # (S, 9)
+    predictions["images"] = images  # (S, 3, H, W)
+    
+    print("World points shape:", predictions["world_points"].shape)
+    print("World points confidence shape:", predictions["world_points_conf"].shape)
+    print("Depth map shape:", predictions["depth"].shape)
+    print("Depth confidence shape:", predictions["depth_conf"].shape)
+    print("Pose encoding shape:", predictions["pose_enc"].shape)
+    print(f"Images shape: {images.shape}")
+    
+    # Convert pose encoding to extrinsic and intrinsic matrices
+    print("Converting pose encoding to extrinsic and intrinsic matrices...")
+    extrinsic, intrinsic = pose_encoding_to_extri_intri(
+        predictions["pose_enc"].unsqueeze(0) if predictions["pose_enc"].ndim == 2 else predictions["pose_enc"], 
+        images.shape[-2:]
+    )
+    predictions["extrinsic"] = extrinsic.squeeze(0)  # (S, 3, 4)
+    predictions["intrinsic"] = intrinsic.squeeze(0) if intrinsic is not None else None  # (S, 3, 3) or None
+    print("Extrinsic shape:", predictions["extrinsic"].shape)
+    print("Intrinsic shape:", predictions["intrinsic"].shape)
+    
+    # Convert tensors to numpy
+    for key in predictions.keys():
+        if isinstance(predictions[key], torch.Tensor):
+            predictions[key] = predictions[key].cpu().numpy()
+    
+    # Generate world points from depth map
+    print("Computing world points from depth map...")
+    predictions["world_points_from_depth"] = predictions["world_points"]
+    
+    # Clean up
+    torch.cuda.empty_cache()
+    
+    return predictions
+
+def plot_mean_attention(all_attn_maps, requested_attn_layers, out_dir, num_frames=None):
+    """Plot mean attention maps with frame boundaries"""
+    os.makedirs(out_dir, exist_ok=True)
+    
+    for layer_idx in requested_attn_layers:
+        attn_list = []
+        for attn_dict in all_attn_maps:
+            if attn_dict and layer_idx in attn_dict and attn_dict[layer_idx] is not None:
+                attn = attn_dict[layer_idx]
+                if isinstance(attn, tuple):
+                    attn = attn[0]
+                attn_list.append(attn.detach().cpu().numpy())
+        
+        if not attn_list:
+            print(f"No attention maps found for layer {layer_idx}")
+            continue
+        
+        attn_stack = np.stack(attn_list, axis=0)  # [num_frames, ...]
+        if attn_stack.ndim == 5:
+            attn_stack = attn_stack.mean(axis=2)  # mean over heads
+        mean_attn = attn_stack.mean(axis=(0,1))  # [N, N]
+        N = mean_attn.shape[0]
+        
+        # Infer S and P
+        S = num_frames if num_frames is not None else len(all_attn_maps)
+        P = N // S if S > 0 else N
+        print(f"Layer {layer_idx}: Inferred S (frames) = {S}, P (tokens per frame) = {P}")
+        
+        plt.figure(figsize=(8, 6))
+        plt.imshow(mean_attn, cmap='viridis')
+        plt.colorbar()
+        plt.title(f"Mean Attention Map - Layer {layer_idx}")
+        plt.xlabel("Key/Memory Token Index")
+        plt.ylabel("Query Token Index")
+        
+        # Draw frame boundaries
+        for f in range(1, S):
+            plt.axhline(f*P-0.5, color='red', linestyle='--', linewidth=0.7)
+            plt.axvline(f*P-0.5, color='red', linestyle='--', linewidth=0.7)
+        
+        # Label axes with frame indices
+        tick_positions = [P//2 + f*P for f in range(S)]
+        frame_labels = [f"F{f}" for f in range(S)]
+        plt.xticks(tick_positions, frame_labels, rotation=90)
+        plt.yticks(tick_positions, frame_labels)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, f"mean_attention_layer{layer_idx}.png"))
+        plt.close()
+
+def save_results(predictions, out_dir):
+    """Save results as numpy files"""
+    os.makedirs(out_dir, exist_ok=True)
+    
+    # Save predictions as npz file
+    prediction_save_path = os.path.join(out_dir, "predictions.npz")
+    np.savez(prediction_save_path, **predictions)
+    print(f"Predictions saved to {prediction_save_path}")
+    
+    # Save individual frame results
+    for i in range(predictions["world_points"].shape[0]):
+        np.save(os.path.join(out_dir, f"frame_{i:04d}_pts3d.npy"), predictions["world_points"][i])
+        np.save(os.path.join(out_dir, f"frame_{i:04d}_depth.npy"), predictions["depth"][i])
+
+def create_3d_visualization(predictions, out_dir, conf_thres=3.0, show_cam=True, mask_black_bg=False, mask_white_bg=False, mask_sky=False, prediction_mode="Pointmap Regression"):
+    """Create 3D GLB visualization from predictions"""
+    print("Creating 3D visualization...")
+    
+    # Create GLB file using the same logic as demo_gradio.py
+    glbfile = os.path.join(
+        out_dir,
+        f"glbscene_{conf_thres}_all_frames_maskb{mask_black_bg}_maskw{mask_white_bg}_cam{show_cam}_sky{mask_sky}_pred{prediction_mode.replace(' ', '_')}.glb",
+    )
+    
+    # Convert predictions to GLB using the same function as demo
+    glbscene = predictions_to_glb(
+        predictions,
+        conf_thres=conf_thres,
+        filter_by_frames="All",
+        mask_black_bg=mask_black_bg,
+        mask_white_bg=mask_white_bg,
+        show_cam=show_cam,
+        mask_sky=mask_sky,
+        target_dir=out_dir,
+        prediction_mode=prediction_mode,
+    )
+    
+    # Export GLB file
+    glbscene.export(file_obj=glbfile)
+    print(f"3D visualization saved to {glbfile}")
+    
+    return glbfile
+
+def main():
+    parser = argparse.ArgumentParser(description="Run StreamVGGT inference on a video and create 3D visualizations.")
+    parser.add_argument("--video", type=str, required=True, help="Path to input video file.")
+    parser.add_argument("--ckpt", type=str, default="ckpt/checkpoints.pth", help="Path to StreamVGGT checkpoint (optional).")
+    parser.add_argument("--out_dir", type=str, default="output_streamvggt", help="Directory to save results.")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to run inference on.")
+    parser.add_argument("--attn_layers", type=str, default=None, help="Comma-separated list of attention layer indices to plot.")
+    parser.add_argument("--fps_interval", type=float, default=1.0, help="Extract 1 frame every N seconds (default: 1.0).")
+    parser.add_argument("--conf_thres", type=float, default=3.0, help="Confidence threshold for 3D visualization (default: 3.0).")
+    parser.add_argument("--show_cam", action="store_true", help="Show cameras in 3D visualization.")
+    parser.add_argument("--mask_black_bg", action="store_true", help="Mask black background in 3D visualization.")
+    parser.add_argument("--mask_white_bg", action="store_true", help="Mask white background in 3D visualization.")
+    parser.add_argument("--mask_sky", action="store_true", help="Apply sky segmentation mask.")
+    parser.add_argument("--prediction_mode", type=str, default="Pointmap Regression", help="Prediction mode for visualization.")
+    parser.add_argument("--no_3d_viz", action="store_true", help="Skip 3D visualization creation.")
+    args = parser.parse_args()
+    
+    # Create output directory
+    os.makedirs(args.out_dir, exist_ok=True)
+    
+    # Extract frames from video
+    print("Extracting frames from video...")
+    temp_dir = os.path.join(args.out_dir, "temp_frames")
+    image_paths = extract_frames_from_video(args.video, temp_dir, args.fps_interval)
+    print(f"Extracted {len(image_paths)} frames to {temp_dir}")
+    
+    # Load model
+    model = load_model()
+    
+    # Parse requested attention layers
+    # requested_attn_layers = None
+    # if args.attn_layers:
+    #     requested_attn_layers = [int(x) for x in args.attn_layers.split(",")]
+    #     print(f"Will extract attention maps from layers: {requested_attn_layers}")
+    
+    # Run model inference
+    print("Running StreamVGGT inference...")
+    predictions = run_model_on_images(image_paths, model)
+    
+    # Save results
+    print("Saving results...")
+    save_results(predictions, args.out_dir)
+    
+    # Plot attention maps if requested
+    # if requested_attn_layers and all_attn_maps:
+    #     print("Plotting mean attention maps...")
+    #     plot_mean_attention(all_attn_maps, requested_attn_layers, args.out_dir, num_frames=len(image_paths))
+    #     print(f"Attention maps saved to {args.out_dir}")
+    
+    # Create 3D visualization if not skipped
+    if not args.no_3d_viz:
+        print("Creating 3D visualization...")
+        glb_file = create_3d_visualization(
+            predictions, 
+            args.out_dir, 
+            conf_thres=args.conf_thres,
+            show_cam=args.show_cam,
+            mask_black_bg=args.mask_black_bg,
+            mask_white_bg=args.mask_white_bg,
+            mask_sky=args.mask_sky,
+            prediction_mode=args.prediction_mode
+        )
+        print(f"3D visualization created: {glb_file}")
+    
+    # Clean up temp directory
+    # import shutil
+    # shutil.rmtree(temp_dir)
+    # print(f"Temporary frames removed from {temp_dir}")
+    
+    print(f"All results saved to {args.out_dir}")
+    print("\nTo view the 3D visualization:")
+    print("1. Download the .glb file from the output directory")
+    print("2. Open it in a 3D viewer like:")
+    print("   - Online: https://gltf-viewer.donmccurdy.com/")
+    print("   - Blender (free)")
+    print("   - Windows 3D Viewer")
+    print("   - Or any GLB-compatible viewer")
+
+if __name__ == "__main__":
+    main() 
