@@ -24,7 +24,7 @@ class Attention(nn.Module):
         proj_drop: float = 0.0,
         norm_layer: nn.Module = nn.LayerNorm,
         qk_norm: bool = False,
-        fused_attn: bool = True,  # use F.scaled_dot_product_attention or not
+        fused_attn: bool = False,  # use F.scaled_dot_product_attention or not
         rope=None,
     ) -> None:
         super().__init__()

@@ -8,6 +8,7 @@ import sys
 import glob
 import time
 from datetime import datetime
+from functools import partial
 
 # Add src to path
 sys.path.append("src/")
@@ -17,6 +18,53 @@ from streamvggt.utils.load_fn import load_and_preprocess_images
 from streamvggt.utils.pose_enc import pose_encoding_to_extri_intri
 from streamvggt.utils.geometry import unproject_depth_map_to_point_map
 from visual_util import predictions_to_glb
+
+import torch
+import torch.nn as nn
+
+
+# --- Storage for the attention maps ---
+attention_maps = {}
+
+def get_attention_map(layer_index, module, inp, out):
+    """
+    A simple hook function.
+    
+    It saves the output of the hooked module into the global 'attention_maps' dictionary
+    with the layer_index as the key.
+    """
+    global attention_maps
+    attention_maps[layer_index] = out.detach().cpu()
+
+def add_hooks(model: nn.Module, layer_indices: list[int], target_module_name: str):
+    """
+    Registers the forward hook on specified layers and returns the hook handles.
+    """
+    handles = []
+    try:
+        global_transformer_blocks = model.aggregator.global_blocks
+    except AttributeError:
+        raise ValueError("Model must have a 'blocks' attribute (a ModuleList).")
+
+    for layer_idx in layer_indices:
+        block = global_transformer_blocks[layer_idx]
+        target_module_found = False
+        for name, module in block.named_modules():
+            if name == target_module_name:
+                hook_fn = partial(get_attention_map, layer_idx)
+                handle = module.register_forward_hook(hook_fn)
+                handles.append(handle)
+                target_module_found = True
+                break
+        if not target_module_found:
+            raise ValueError(f"Module '{target_module_name}' not found in block {layer_idx}.")
+            
+    return handles
+
+def remove_hooks(handles: list):
+    """Removes all hooks using their handles."""
+    for handle in handles:
+        handle.remove()
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -284,16 +332,26 @@ def main():
     
     # Load model
     model = load_model()
+
+    
     
     # Parse requested attention layers
-    # requested_attn_layers = None
-    # if args.attn_layers:
-    #     requested_attn_layers = [int(x) for x in args.attn_layers.split(",")]
-    #     print(f"Will extract attention maps from layers: {requested_attn_layers}")
+    requested_attn_layers = None
+    if args.attn_layers:
+        requested_attn_layers = [int(x) for x in args.attn_layers.split(",")]
+        print(f"Will extract attention maps from layers: {requested_attn_layers}")
+        attention_maps.clear() # Clear the dictionary before use
+
+        #Add the hooks and save the handles
+        hook_handles = add_hooks(model, requested_attn_layers, "attn.attn_drop")
+        print(f"Hooks registered for layers {requested_attn_layers}...")
     
     # Run model inference
     print("Running StreamVGGT inference...")
     predictions = run_model_on_images(image_paths, model)
+
+    if requested_attn_layers:
+        remove_hooks(hook_handles)
     
     # Save results
     print("Saving results...")
