@@ -23,48 +23,193 @@ import torch
 import torch.nn as nn
 
 
-# --- Storage for the attention maps ---
-attention_maps = {}
+class AttentionMapExtractor:
+    """
+    A class to extract attention maps from a Vision Transformer.
 
-def get_attention_map(layer_index, module, inp, out):
-    """
-    A simple hook function.
-    
-    It saves the output of the hooked module into the global 'attention_maps' dictionary
-    with the layer_index as the key.
-    """
-    global attention_maps
-    attention_maps[layer_index] = out.detach().cpu()
+    This class uses PyTorch hooks to capture the output of the attention
+    mechanism from specified layers. It's designed to be used as a
+    context manager.
 
-def add_hooks(model: nn.Module, layer_indices: list[int], target_module_name: str):
+    Args:
+        model (nn.Module): The Vision Transformer model.
+        target_module_name (str): The name of the module within each transformer
+                                  block whose output is the attention map.
+                                  e.g., 'attn_drop'.
     """
-    Registers the forward hook on specified layers and returns the hook handles.
-    """
-    handles = []
-    try:
-        global_transformer_blocks = model.aggregator.global_blocks
-    except AttributeError:
-        raise ValueError("Model must have a 'blocks' attribute (a ModuleList).")
+    def __init__(self, model: nn.Module, target_module_name: str, layer_indices: list[int], num_frames: int):
+        self.model = model
+        self.target_module_name = target_module_name
+        # self.attention_maps = {}
+        self._hooks = []
+        self.curr_frame_index = 0
+        self.num_forward_passes = 0
+        self.layer_indices = layer_indices
+        self.layer_num = len(layer_indices)
+        self.num_frames = num_frames
 
-    for layer_idx in layer_indices:
-        block = global_transformer_blocks[layer_idx]
-        target_module_found = False
-        for name, module in block.named_modules():
-            if name == target_module_name:
-                hook_fn = partial(get_attention_map, layer_idx)
-                handle = module.register_forward_hook(hook_fn)
-                handles.append(handle)
-                target_module_found = True
-                break
-        if not target_module_found:
-            raise ValueError(f"Module '{target_module_name}' not found in block {layer_idx}.")
+    def _get_attention_map(self, layer_index: int, module: nn.Module, inp: tuple, out: torch.Tensor):
+        """Hook function to capture the attention map."""
+        # The attention map is the output of the target module.
+        # We detach and clone it to move it to the CPU and avoid holding onto the computation graph.
+        self.attention_maps[self.curr_frame_index][layer_index] = out.detach().cpu()
+        self.num_forward_passes += 1
+        self.curr_frame_index = self.num_forward_passes // self.layer_num
+
+    def __enter__(self):
+        """Register hooks for the specified layers."""
+        # self.attention_maps = {} # Clear previous maps
+        self._hooks = []
+        self.attention_maps =[{} for _ in range(self.num_frames)]
+
+        # Find the transformer blocks (assuming they are in a ModuleList named 'blocks')
+        try:
+            transformer_blocks = self.model.aggregator.global_blocks
+        except AttributeError:
+            raise ValueError("The model must have a 'blocks' attribute which is a ModuleList of transformer blocks.")
+
+        for layer_idx in self.layer_indices:
+            if layer_idx >= len(transformer_blocks):
+                raise ValueError(f"Layer index {layer_idx} is out of bounds for model with {len(transformer_blocks)} layers.")
+
+            block = transformer_blocks[layer_idx]
             
-    return handles
+            # Find the target module within the block
+            target_module_found = False
+            for name, module in block.named_modules():
+                if name == self.target_module_name:
+                    # Register the hook using a partial function to pass the layer_index
+                    hook = module.register_forward_hook(
+                        partial(self._get_attention_map, layer_idx)
+                    )
+                    self._hooks.append(hook)
+                    target_module_found = True
+                    break
+            
+            if not target_module_found:
+                raise ValueError(f"Target module '{self.target_module_name}' not found in block {layer_idx}.")
+        
+        return self
 
-def remove_hooks(handles: list):
-    """Removes all hooks using their handles."""
-    for handle in handles:
-        handle.remove()
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Remove all registered hooks."""
+        for hook in self._hooks:
+            hook.remove()
+        self._hooks = []
+
+    def get_maps(self):
+        """Returns the collected attention maps."""
+        return self.attention_maps
+
+
+def build_full_attention_matrices_averaged(list_of_attention_dicts: list[dict]) -> dict:
+    """
+    Builds full, square attention matrices by averaging over the attention heads.
+
+    Args:
+        list_of_attention_dicts: A list where each element is a dictionary
+            of attention maps from a single frame's forward pass. Assumes
+            each tensor has a shape of (1, H, N, ...).
+
+    Returns:
+        A dictionary where keys are layer indices and values are the full
+        2D square attention tensors of shape (N*T, N*T), averaged over heads.
+    """
+    if not list_of_attention_dicts:
+        return {}
+
+    # --- 1. Determine parameters ---
+    num_frames = len(list_of_attention_dicts)
+    layer_indices = list(list_of_attention_dicts[-1].keys())
+    first_map_4d = list(list_of_attention_dicts[0].values())[0]
+    _, _, tokens_per_frame, _ = first_map_4d.shape
+    total_tokens = tokens_per_frame * num_frames
+
+    # --- 2. Initialize output dictionary with 2D zero tensors ---
+    final_attention_maps = {}
+    for layer_idx in layer_indices:
+        final_attention_maps[layer_idx] = torch.zeros(
+            (total_tokens, total_tokens),
+            dtype=first_map_4d.dtype,
+            device=first_map_4d.device
+        )
+
+    # --- 3. Fill the matrices with averaged maps ---
+    for layer_idx in layer_indices:
+        for frame_idx, frame_attention_dict in enumerate(list_of_attention_dicts):
+            # Shape: (1, H, N, N * (frame_idx + 1))
+            partial_map_4d = frame_attention_dict[layer_idx]
+            
+            # CRITICAL CHANGE: Squeeze batch dim and average over head dim
+            # Shape becomes: (N, N * (frame_idx + 1))
+            averaged_map_2d = partial_map_4d.squeeze(0).mean(dim=0)
+
+            # Define the 2D slice to place this partial map
+            row_start = frame_idx * tokens_per_frame
+            row_end = (frame_idx + 1) * tokens_per_frame
+            col_end = (frame_idx + 1) * tokens_per_frame
+
+            # Place the 2D averaged map into the 2D full matrix
+            final_attention_maps[layer_idx][row_start:row_end, :col_end] = averaged_map_2d
+
+    return final_attention_maps
+
+
+def save_all_attention_plots(
+    full_attention_matrices: dict,
+    tokens_per_frame: int = 1374,
+    output_folder: str = "attention_plots"
+):
+    """
+    Plots and saves the head-averaged attention map for every layer.
+
+    Args:
+        full_attention_matrices (dict): Dict of 2D attention tensors.
+        tokens_per_frame (int): The number of tokens in a single frame.
+        output_folder (str): The folder where plots will be saved.
+    """
+    # --- 1. Create the output directory if it doesn't exist ---
+    os.makedirs(output_folder, exist_ok=True)
+    print(f"Saving plots to '{output_folder}/' directory...")
+
+    # --- 2. Loop through all layers in the dictionary ---
+    for layer_idx, attn_map_to_plot_tensor in full_attention_matrices.items():
+        attn_map_to_plot = attn_map_to_plot_tensor.cpu().numpy()
+        total_tokens = attn_map_to_plot.shape[0]
+        num_frames = total_tokens // tokens_per_frame
+
+        fig, ax = plt.subplots(figsize=(12, 10))
+        im = ax.imshow(attn_map_to_plot, cmap='viridis', interpolation='nearest')
+
+        # Draw frame boundaries
+        for i in range(1, num_frames):
+            boundary = i * tokens_per_frame - 0.5
+            ax.axhline(y=boundary, color='white', linestyle='--', linewidth=1.5)
+            ax.axvline(x=boundary, color='white', linestyle='--', linewidth=1.5)
+
+        # Add labels and title
+        ax.set_title(f'Attention Map - Layer {layer_idx} (Averaged Over Heads)', fontsize=16)
+        ax.set_xlabel('Key Tokens (All Frames)', fontsize=12)
+        ax.set_ylabel('Query Tokens (All Frames)', fontsize=12)
+        
+        tick_locations = [i * tokens_per_frame + tokens_per_frame / 2 for i in range(num_frames)]
+        tick_labels = [f'Frame {i}' for i in range(num_frames)]
+        ax.set_xticks(tick_locations)
+        ax.set_xticklabels(tick_labels, rotation=45)
+        ax.set_yticks(tick_locations)
+        ax.set_yticklabels(tick_labels)
+
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        plt.tight_layout()
+
+        # --- 3. Save the figure to a file ---
+        save_path = os.path.join(output_folder, f"attention_layer_{layer_idx}.png")
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        
+        # --- 4. Close the plot to free memory ---
+        plt.close(fig)
+        
+    print("All plots saved successfully. ✅")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -148,6 +293,8 @@ def run_model_on_images(image_paths, model):
         }
         frames.append(frame)
     
+
+    # frames is a list of dicts, each dict has a key "img" with a value of shape (1, 3, H, W)
     # Run inference with same dtype handling as demo
     print("Running inference...")
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
@@ -211,55 +358,6 @@ def run_model_on_images(image_paths, model):
     
     return predictions
 
-def plot_mean_attention(all_attn_maps, requested_attn_layers, out_dir, num_frames=None):
-    """Plot mean attention maps with frame boundaries"""
-    os.makedirs(out_dir, exist_ok=True)
-    
-    for layer_idx in requested_attn_layers:
-        attn_list = []
-        for attn_dict in all_attn_maps:
-            if attn_dict and layer_idx in attn_dict and attn_dict[layer_idx] is not None:
-                attn = attn_dict[layer_idx]
-                if isinstance(attn, tuple):
-                    attn = attn[0]
-                attn_list.append(attn.detach().cpu().numpy())
-        
-        if not attn_list:
-            print(f"No attention maps found for layer {layer_idx}")
-            continue
-        
-        attn_stack = np.stack(attn_list, axis=0)  # [num_frames, ...]
-        if attn_stack.ndim == 5:
-            attn_stack = attn_stack.mean(axis=2)  # mean over heads
-        mean_attn = attn_stack.mean(axis=(0,1))  # [N, N]
-        N = mean_attn.shape[0]
-        
-        # Infer S and P
-        S = num_frames if num_frames is not None else len(all_attn_maps)
-        P = N // S if S > 0 else N
-        print(f"Layer {layer_idx}: Inferred S (frames) = {S}, P (tokens per frame) = {P}")
-        
-        plt.figure(figsize=(8, 6))
-        plt.imshow(mean_attn, cmap='viridis')
-        plt.colorbar()
-        plt.title(f"Mean Attention Map - Layer {layer_idx}")
-        plt.xlabel("Key/Memory Token Index")
-        plt.ylabel("Query Token Index")
-        
-        # Draw frame boundaries
-        for f in range(1, S):
-            plt.axhline(f*P-0.5, color='red', linestyle='--', linewidth=0.7)
-            plt.axvline(f*P-0.5, color='red', linestyle='--', linewidth=0.7)
-        
-        # Label axes with frame indices
-        tick_positions = [P//2 + f*P for f in range(S)]
-        frame_labels = [f"F{f}" for f in range(S)]
-        plt.xticks(tick_positions, frame_labels, rotation=90)
-        plt.yticks(tick_positions, frame_labels)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, f"mean_attention_layer{layer_idx}.png"))
-        plt.close()
 
 def save_results(predictions, out_dir):
     """Save results as numpy files"""
@@ -340,28 +438,32 @@ def main():
     if args.attn_layers:
         requested_attn_layers = [int(x) for x in args.attn_layers.split(",")]
         print(f"Will extract attention maps from layers: {requested_attn_layers}")
-        attention_maps.clear() # Clear the dictionary before use
+        extractor = AttentionMapExtractor(model, target_module_name="attn.attn_drop", layer_indices=requested_attn_layers, num_frames=len(image_paths))
+        with extractor:
 
-        #Add the hooks and save the handles
-        hook_handles = add_hooks(model, requested_attn_layers, "attn.attn_drop")
-        print(f"Hooks registered for layers {requested_attn_layers}...")
-    
-    # Run model inference
-    print("Running StreamVGGT inference...")
-    predictions = run_model_on_images(image_paths, model)
+        
+            # Perform the forward pass
+            print("Running StreamVGGT inference...")
+            predictions = run_model_on_images(image_paths, model)
 
-    if requested_attn_layers:
-        remove_hooks(hook_handles)
+            # The attention maps are now stored in the extractor instance
+            attention_maps = extractor.get_maps()
+            full_attention_matrices = build_full_attention_matrices_averaged(attention_maps)
+            save_all_attention_plots(full_attention_matrices)
+
+
+    else:
+        # Run model inference
+        print("Running StreamVGGT inference...")
+        predictions = run_model_on_images(image_paths, model)
+
+
+
     
     # Save results
     print("Saving results...")
     save_results(predictions, args.out_dir)
     
-    # Plot attention maps if requested
-    # if requested_attn_layers and all_attn_maps:
-    #     print("Plotting mean attention maps...")
-    #     plot_mean_attention(all_attn_maps, requested_attn_layers, args.out_dir, num_frames=len(image_paths))
-    #     print(f"Attention maps saved to {args.out_dir}")
     
     # Create 3D visualization if not skipped
     if not args.no_3d_viz:

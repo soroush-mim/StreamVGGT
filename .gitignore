@@ -8,3 +8,4 @@ src/streamvggt/heads/track_modules/__pycache__/base_track_predictor.cpython-311.
 src/streamvggt/heads/track_modules/__pycache__/blocks.cpython-311.pyc
 src/streamvggt/heads/track_modules/__pycache__/modules.cpython-311.pyc
 src/streamvggt/heads/track_modules/__pycache__/utils.cpython-311.pyc
+attention_plots/*
