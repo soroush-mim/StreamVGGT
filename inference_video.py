@@ -52,7 +52,7 @@ class AttentionMapExtractor:
         """Hook function to capture the attention map."""
         # The attention map is the output of the target module.
         # We detach and clone it to move it to the CPU and avoid holding onto the computation graph.
-        self.attention_maps[self.curr_frame_index][layer_index] = out.detach().cpu()
+        self.attention_maps[self.curr_frame_index][layer_index] = out.squeeze(0).mean(dim=0).detach().cpu()
         self.num_forward_passes += 1
         self.curr_frame_index = self.num_forward_passes // self.layer_num
 
@@ -62,9 +62,10 @@ class AttentionMapExtractor:
         self._hooks = []
         self.attention_maps =[{} for _ in range(self.num_frames)]
 
-        # Find the transformer blocks (assuming they are in a ModuleList named 'blocks')
+        # Find the transformer blocks (assuming they are in a Modu)leList named 'blocks')
         try:
             transformer_blocks = self.model.aggregator.global_blocks
+            print(len(transformer_blocks))
         except AttributeError:
             raise ValueError("The model must have a 'blocks' attribute which is a ModuleList of transformer blocks.")
 
@@ -122,7 +123,7 @@ def build_full_attention_matrices_averaged(list_of_attention_dicts: list[dict]) 
     num_frames = len(list_of_attention_dicts)
     layer_indices = list(list_of_attention_dicts[-1].keys())
     first_map_4d = list(list_of_attention_dicts[0].values())[0]
-    _, _, tokens_per_frame, _ = first_map_4d.shape
+    tokens_per_frame, _ = first_map_4d.shape
     total_tokens = tokens_per_frame * num_frames
 
     # --- 2. Initialize output dictionary with 2D zero tensors ---
@@ -142,7 +143,7 @@ def build_full_attention_matrices_averaged(list_of_attention_dicts: list[dict]) 
             
             # CRITICAL CHANGE: Squeeze batch dim and average over head dim
             # Shape becomes: (N, N * (frame_idx + 1))
-            averaged_map_2d = partial_map_4d.squeeze(0).mean(dim=0)
+            # averaged_map_2d = partial_map_4d.squeeze(0).mean(dim=0)
 
             # Define the 2D slice to place this partial map
             row_start = frame_idx * tokens_per_frame
@@ -150,34 +151,43 @@ def build_full_attention_matrices_averaged(list_of_attention_dicts: list[dict]) 
             col_end = (frame_idx + 1) * tokens_per_frame
 
             # Place the 2D averaged map into the 2D full matrix
-            final_attention_maps[layer_idx][row_start:row_end, :col_end] = averaged_map_2d
+            final_attention_maps[layer_idx][row_start:row_end, :col_end] = partial_map_4d
 
     return final_attention_maps
 
 
 def save_all_attention_plots(
     full_attention_matrices: dict,
-    tokens_per_frame: int = 1374,
-    output_folder: str = "attention_plots"
+    tokens_per_frame: int=1374,
+    output_folder: str = "attention_plots_scaled",
+    apply_scale: bool = False
 ):
     """
-    Plots and saves the head-averaged attention map for every layer.
-
-    Args:
-        full_attention_matrices (dict): Dict of 2D attention tensors.
-        tokens_per_frame (int): The number of tokens in a single frame.
-        output_folder (str): The folder where plots will be saved.
+    Plots, scales, and saves the head-averaged attention map for every layer.
     """
-    # --- 1. Create the output directory if it doesn't exist ---
     os.makedirs(output_folder, exist_ok=True)
-    print(f"Saving plots to '{output_folder}/' directory...")
+    print(f"Saving scaled plots to '{output_folder}/' directory...")
 
-    # --- 2. Loop through all layers in the dictionary ---
-    for layer_idx, attn_map_to_plot_tensor in full_attention_matrices.items():
-        attn_map_to_plot = attn_map_to_plot_tensor.cpu().numpy()
-        total_tokens = attn_map_to_plot.shape[0]
+    for layer_idx, attn_map_tensor in full_attention_matrices.items():
+        total_tokens = attn_map_tensor.shape[0]
         num_frames = total_tokens // tokens_per_frame
+        
+        # Create a copy to avoid modifying the original dictionary in-place
+        scaled_map_tensor = attn_map_tensor.clone()
 
+        if apply_scale:
+            # --- SCALING BLOCK: Apply the scaling as requested ---
+            for i in range(num_frames):
+                row_start = i * tokens_per_frame
+                row_end = (i + 1) * tokens_per_frame
+                scale_factor = i + 1
+                
+                # Multiply the rows corresponding to frame 'i' by 'i+1'
+                scaled_map_tensor[row_start:row_end, :] *= scale_factor
+            # ----------------------------------------------------
+
+        attn_map_to_plot = scaled_map_tensor.cpu().numpy()
+        
         fig, ax = plt.subplots(figsize=(12, 10))
         im = ax.imshow(attn_map_to_plot, cmap='viridis', interpolation='nearest')
 
@@ -187,8 +197,7 @@ def save_all_attention_plots(
             ax.axhline(y=boundary, color='white', linestyle='--', linewidth=1.5)
             ax.axvline(x=boundary, color='white', linestyle='--', linewidth=1.5)
 
-        # Add labels and title
-        ax.set_title(f'Attention Map - Layer {layer_idx} (Averaged Over Heads)', fontsize=16)
+        ax.set_title(f'Scaled Attention Map - Layer {layer_idx}\n(Rows for Frame i scaled by i+1)', fontsize=16)
         ax.set_xlabel('Key Tokens (All Frames)', fontsize=12)
         ax.set_ylabel('Query Tokens (All Frames)', fontsize=12)
         
@@ -202,14 +211,123 @@ def save_all_attention_plots(
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         plt.tight_layout()
 
-        # --- 3. Save the figure to a file ---
-        save_path = os.path.join(output_folder, f"attention_layer_{layer_idx}.png")
+        save_path = os.path.join(output_folder, f"scaled_attention_layer_{layer_idx}.png")
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        
-        # --- 4. Close the plot to free memory ---
         plt.close(fig)
         
-    print("All plots saved successfully. ✅")
+    print("All scaled plots saved successfully. ✅")
+
+def save_frame_level_plots(
+    full_attention_matrices: dict,
+    tokens_per_frame: int=1374,
+    output_folder: str = "attention_plots_frame_level"
+    ):
+    """
+    Creates and saves plots of frame-to-frame average attention.
+    """
+    os.makedirs(output_folder, exist_ok=True)
+    print(f"\nSaving frame-level plots to '{output_folder}/'...")
+
+    for layer_idx, full_map in full_attention_matrices.items():
+        total_tokens = full_map.shape[0]
+        num_frames = total_tokens // tokens_per_frame
+        
+        # Initialize the new (num_frames, num_frames) map
+        frame_level_map = torch.zeros((num_frames, num_frames))
+
+        # Calculate the average attention between each pair of frames
+        for i in range(num_frames): # Query frame
+            for j in range(num_frames): # Key frame
+                row_start, row_end = i * tokens_per_frame, (i + 1) * tokens_per_frame
+                col_start, col_end = j * tokens_per_frame, (j + 1) * tokens_per_frame
+                
+                # Extract the block corresponding to (frame_i -> frame_j) attention
+                attention_block = full_map[row_start:row_end, col_start:col_end]
+                
+                # Calculate the mean and store it
+                frame_level_map[i, j] = attention_block.mean()
+
+        # Plotting logic
+        fig, ax = plt.subplots(figsize=(8, 7))
+        im = ax.imshow(frame_level_map.cpu().numpy(), cmap='plasma', interpolation='nearest')
+        
+        ax.set_title(f'Frame-to-Frame Attention - Layer {layer_idx}\n(Averaged over Tokens & Heads)', fontsize=14)
+        ax.set_xlabel('Key Frames', fontsize=12)
+        ax.set_ylabel('Query Frames', fontsize=12)
+        
+        tick_labels = [f'Frame {i}' for i in range(num_frames)]
+        ax.set_xticks(range(num_frames))
+        ax.set_xticklabels(tick_labels, rotation=45)
+        ax.set_yticks(range(num_frames))
+        ax.set_yticklabels(tick_labels)
+
+        # Add text labels for values in each cell
+        for i in range(num_frames):
+            for j in range(num_frames):
+                ax.text(j, i, f'{frame_level_map[i, j]:.3f}', ha='center', va='center', color='white', fontsize=10)
+
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        plt.tight_layout()
+        
+        save_path = os.path.join(output_folder, f"frame_attention_layer_{layer_idx}.png")
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        
+    print("Frame-level plots saved successfully. ✅")
+
+def save_layer_averaged_plot(
+    full_attention_matrices: dict,
+    tokens_per_frame: int=1374,
+    output_folder: str = "attention_plots_layer_averaged"
+):
+    """
+    Averages attention maps across all layers and saves the single resulting plot.
+    """
+    os.makedirs(output_folder, exist_ok=True)
+    print(f"\nSaving layer-averaged plot to '{output_folder}/'...")
+
+    if not full_attention_matrices:
+        print("Dictionary is empty, nothing to average.")
+        return
+
+    # --- 1. Stack all layer maps and average them ---
+    # Create a new dimension for layers, then compute the mean over it
+    stacked_maps = torch.stack(list(full_attention_matrices.values()), dim=0)
+    layer_averaged_map = stacked_maps.mean(dim=0)
+
+    # --- 2. Plotting (similar to the original plotting function) ---
+    attn_map_to_plot = layer_averaged_map.cpu().numpy()
+    total_tokens = attn_map_to_plot.shape[0]
+    num_frames = total_tokens // tokens_per_frame
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    im = ax.imshow(attn_map_to_plot, cmap='viridis', interpolation='nearest')
+
+    for i in range(1, num_frames):
+        boundary = i * tokens_per_frame - 0.5
+        ax.axhline(y=boundary, color='white', linestyle='--', linewidth=1.5)
+        ax.axvline(x=boundary, color='white', linestyle='--', linewidth=1.5)
+    
+    layer_keys = list(full_attention_matrices.keys())
+    ax.set_title(f'Layer-Averaged Attention Map (Layers {layer_keys})', fontsize=16)
+    ax.set_xlabel('Key Tokens (All Frames)', fontsize=12)
+    ax.set_ylabel('Query Tokens (All Frames)', fontsize=12)
+    
+    tick_locations = [i * tokens_per_frame + tokens_per_frame / 2 for i in range(num_frames)]
+    tick_labels = [f'Frame {i}' for i in range(num_frames)]
+    ax.set_xticks(tick_locations)
+    ax.set_xticklabels(tick_labels, rotation=45)
+    ax.set_yticks(tick_locations)
+    ax.set_yticklabels(tick_labels)
+
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    plt.tight_layout()
+    
+    save_path = os.path.join(output_folder, "attention_averaged_over_all_layers.png")
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    
+    print("Layer-averaged plot saved successfully. ✅")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -217,7 +335,7 @@ def load_model():
     """Load StreamVGGT model following the same logic as demo_gradio.py"""
     print("Initializing and loading StreamVGGT model...")
     
-    local_ckpt_path = "ckpt/checkpoints.pth"
+    local_ckpt_path = "/data/soroush/StreamVGGT/ckpt/checkpoints.pth"
     if os.path.exists(local_ckpt_path):
         print(f"Loading local checkpoint from {local_ckpt_path}")
         model = StreamVGGT()
@@ -358,7 +476,6 @@ def run_model_on_images(image_paths, model):
     
     return predictions
 
-
 def save_results(predictions, out_dir):
     """Save results as numpy files"""
     os.makedirs(out_dir, exist_ok=True)
@@ -405,7 +522,7 @@ def create_3d_visualization(predictions, out_dir, conf_thres=3.0, show_cam=True,
 def main():
     parser = argparse.ArgumentParser(description="Run StreamVGGT inference on a video and create 3D visualizations.")
     parser.add_argument("--video", type=str, required=True, help="Path to input video file.")
-    parser.add_argument("--ckpt", type=str, default="ckpt/checkpoints.pth", help="Path to StreamVGGT checkpoint (optional).")
+    parser.add_argument("--ckpt", type=str, default="/data/soroush/StreamVGGT/ckpt/checkpoints.pth", help="Path to StreamVGGT checkpoint (optional).")
     parser.add_argument("--out_dir", type=str, default="output_streamvggt", help="Directory to save results.")
     parser.add_argument("--device", type=str, default="cuda", help="Device to run inference on.")
     parser.add_argument("--attn_layers", type=str, default=None, help="Comma-separated list of attention layer indices to plot.")
@@ -448,8 +565,11 @@ def main():
 
             # The attention maps are now stored in the extractor instance
             attention_maps = extractor.get_maps()
-            full_attention_matrices = build_full_attention_matrices_averaged(attention_maps)
-            save_all_attention_plots(full_attention_matrices)
+            attention_maps = build_full_attention_matrices_averaged(attention_maps)
+            save_all_attention_plots(attention_maps, apply_scale=True)
+            # save_frame_level_plots(full_attention_matrices=attention_maps)
+            # Plot 2: A single plot averaged over all layers
+            # save_layer_averaged_plot(full_attention_matrices=attention_maps)
 
 
     else:
