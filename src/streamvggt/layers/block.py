@@ -73,8 +73,8 @@ class Block(nn.Module):
             
         def attn_residual_func(x: Tensor, pos=None, attn_mask=None, past_key_values=None, use_cache=False) -> Union[Tensor, Tuple[Tensor, Dict]]:
             if use_cache:
-                output, new_kv = self.attn(self.norm1(x), pos=pos, past_key_values=past_key_values, use_cache=True)
-                return self.ls1(output), new_kv
+                output, new_kv, attn_map = self.attn(self.norm1(x), pos=pos, past_key_values=past_key_values, use_cache=True)
+                return self.ls1(output), new_kv, attn_map
             else:
                 if attn_mask is not None:
                     return self.ls1(self.attn(self.norm1(x), pos=pos, attn_mask=attn_mask))
@@ -84,10 +84,10 @@ class Block(nn.Module):
             return self.ls2(self.mlp(self.norm2(x)))
         
         if use_cache:
-            attn_output, new_kv = attn_residual_func(x, pos=pos, past_key_values=past_key_values, use_cache=True)
+            attn_output, new_kv, attn_map = attn_residual_func(x, pos=pos, past_key_values=past_key_values, use_cache=True)
             x = x + attn_output
             x = x + ffn_residual_func(x)
-            return x, new_kv
+            return x, new_kv, attn_map
 
         if self.training and self.sample_drop_ratio > 0.1:
             # the overhead is compensated only for a drop path rate larger than 0.1

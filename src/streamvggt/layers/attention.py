@@ -103,7 +103,7 @@ class Attention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         if use_cache:
-            return x, new_kv
+            return x, new_kv, attn.squeeze(0).mean(0)
         return x
 
 

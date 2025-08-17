@@ -135,7 +135,7 @@ class CameraHead(nn.Module):
 
             if use_cache:
                 for idx in range(self.trunk_depth):
-                    pose_tokens_modulated, block_kv = self.trunk[idx](
+                    pose_tokens_modulated, block_kv, attn_map = self.trunk[idx](
                         pose_tokens_modulated,
                         attn_mask=attn_mask,
                         past_key_values=past_key_values_camera[idx] if past_key_values_camera[idx] is not None else None,

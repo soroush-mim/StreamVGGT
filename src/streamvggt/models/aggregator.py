@@ -257,6 +257,7 @@ class Aggregator(nn.Module):
         frame_idx = 0
         global_idx = 0
         output_list = []
+        attn_maps = []
 
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
@@ -268,13 +269,14 @@ class Aggregator(nn.Module):
                     if use_cache:
                         if past_key_values[global_idx] is not None:
                             k, v = past_key_values[global_idx]
-                        tokens, global_idx, global_intermediates, new_kv = self._process_global_attention(
+                        tokens, global_idx, global_intermediates, new_kv, block_attn_map = self._process_global_attention(
                             tokens, B, S, P, C, global_idx, pos=pos,
                             past_key_values_block=past_key_values[global_idx] if past_key_values[global_idx] is not None else None,
                             use_cache=True,
                             past_frame_idx=past_frame_idx
                         )
                         past_key_values[global_idx - 1] = new_kv
+                        attn_maps.append(block_attn_map)
                     else: 
                         tokens, global_idx, global_intermediates = self._process_global_attention(
                             tokens, B, S, P, C, global_idx, pos=pos
@@ -290,7 +292,7 @@ class Aggregator(nn.Module):
         del frame_intermediates
         del global_intermediates
         if use_cache:      
-            return output_list, self.patch_start_idx, past_key_values
+            return output_list, self.patch_start_idx, past_key_values, attn_maps
         return output_list, self.patch_start_idx
 
     def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
@@ -349,7 +351,7 @@ class Aggregator(nn.Module):
                 attn_mask = None
                 
             if use_cache:
-                tokens, block_kv = self.global_blocks[global_idx](
+                tokens, block_kv, block_attn_map = self.global_blocks[global_idx](
                     tokens, 
                     pos=pos, 
                     attn_mask=attn_mask, 
@@ -364,7 +366,7 @@ class Aggregator(nn.Module):
             # if self.use_causal_global:
             #     del attn_mask
         if use_cache:
-            return tokens, global_idx, intermediates, block_kv
+            return tokens, global_idx, intermediates, block_kv, block_attn_map
         return tokens, global_idx, intermediates
 
 

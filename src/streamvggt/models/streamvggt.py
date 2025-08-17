@@ -118,8 +118,10 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 past_frame_idx=i
             )
             
-            if isinstance(aggregator_output, tuple) and len(aggregator_output) == 3:
-                aggregated_tokens, patch_start_idx, past_key_values = aggregator_output
+            if isinstance(aggregator_output, tuple) and len(aggregator_output) == 4:
+                aggregated_tokens, patch_start_idx, past_key_values, attn_maps_global_layers = aggregator_output
+                # attn_maps_global_layers is a list with len=#layers. for each layer we have attention map averaged on heads between current frame tokens and
+                # tokens from previous frames + current frame
             else:
                 aggregated_tokens, patch_start_idx = aggregator_output
             
