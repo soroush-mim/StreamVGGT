@@ -46,7 +46,7 @@ class Attention(nn.Module):
         x: torch.Tensor, 
         pos=None, 
         attn_mask=None, 
-        past_key_values=None, 
+        past_key_values=None,
         use_cache=False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Tuple]]:
         B, N, C = x.shape
@@ -55,21 +55,25 @@ class Attention(nn.Module):
 
         pos_k = pos
         if use_cache:
-            k = k.unsqueeze(2)
-            v = v.unsqueeze(2)
+            # k = k.unsqueeze(2)
+            # v = v.unsqueeze(2)
             if past_key_values is not None:
-                past_k, past_v = past_key_values
+                # past_k, past_v = past_key_values
+                past_k, past_v, past_pos_k = past_key_values
                 k = torch.cat([past_k, k], dim=2)
                 v = torch.cat([past_v, v], dim=2)
+
+                if pos_k is not None:
+                    pos_k = torch.cat([past_pos_k, pos_k], dim=1)
+
                 
-            new_kv = (k, v)
-            a, b, c, d, e = k.shape
-            k = k.reshape(a, b, c*d, e)
-            v = v.reshape(a, b, c*d, e)
-            if pos_k is not None:
-                #print(pos_k.shape)
-                pos_k = pos_k.repeat(1, c, 1)
-                #print(pos_k.shape)
+            new_kv = (k, v, pos_k)
+            # new_kv = (k, v)
+            # a, b, c, d, e = k.shape
+            # k = k.reshape(a, b, c*d, e)
+            # v = v.reshape(a, b, c*d, e)
+            # if pos_k is not None:
+            #     pos_k = pos_k.repeat(1, c, 1)
 
         q, k = self.q_norm(q), self.k_norm(k)
 
@@ -103,8 +107,10 @@ class Attention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         if use_cache:
-            return x, new_kv, attn.squeeze(0).mean(0)
+            return x, new_kv, attn.squeeze(0).mean(0).detach()
         return x
+
+
 
 
 class MemEffAttention(Attention):

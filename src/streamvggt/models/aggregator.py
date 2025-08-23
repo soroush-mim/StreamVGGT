@@ -205,8 +205,8 @@ class Aggregator(nn.Module):
         B, S, C_in, H, W = images.shape
 
         if use_cache and past_key_values[0] is not None:
-            _, _, S_true, _, _ = past_key_values[0][0].shape
-            S_true += 1
+            # _, _, S_true, _, _ = past_key_values[0][0].shape
+            S_true = past_frame_idx + 1
         else:
             S_true = S
         
@@ -228,7 +228,7 @@ class Aggregator(nn.Module):
 
         _, P, C = patch_tokens.shape
 
-        if use_cache:
+        if use_cache: #S_true = past_frame_idx + 1
             camera_token_full = slice_expand_and_flatten(self.camera_token, B, S_true)
             camera_token = camera_token_full[-1:, :, :]
             
@@ -267,8 +267,8 @@ class Aggregator(nn.Module):
                     )
                 elif attn_type == "global":
                     if use_cache:
-                        if past_key_values[global_idx] is not None:
-                            k, v = past_key_values[global_idx]
+                        # if past_key_values[global_idx] is not None:
+                            # k, v = past_key_values[global_idx]
                         tokens, global_idx, global_intermediates, new_kv, block_attn_map = self._process_global_attention(
                             tokens, B, S, P, C, global_idx, pos=pos,
                             past_key_values_block=past_key_values[global_idx] if past_key_values[global_idx] is not None else None,
