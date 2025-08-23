@@ -124,13 +124,17 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 # attn_maps_global_layers is a list with len=#layers. for each layer we have attention map averaged on heads between current frame tokens and
                 # tokens from previous frames + current frame
                 if i==0:
-                    cum_attn_maps = [map.clone() for map in attn_maps_global_layers]
+                    # first frame att = inf to keep all tokens from first frame
+                    cum_attn_maps = [torch.full_like(map, float('inf'))  for map in attn_maps_global_layers]
 
                 elif i>0:
                     for j, attn_map in enumerate(attn_maps_global_layers):
                         temp = cum_attn_maps[j]
                         cum_attn_maps[j] = attn_map
-                        cum_attn_maps[j][:, :temp.size(1)] + temp
+                        cum_attn_maps[j] = cum_attn_maps[j][:, :temp.size(1)] + temp
+                        frame_token_num = attn_map.shape[0]
+                        # set special tokens attention to inf
+                        cum_attn_maps[j][-1, -frame_token_num:-frame_token_num+patch_start_idx]=float('inf')
                     
 
                     kv_remove_indices = self.get_remove_indices(cum_attn_maps, S=i, rm_percentage=10)
@@ -223,7 +227,7 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 # avg on iterations per frame
                 scores = scores / (S+1) #maybe changing it to EMA
                 # set scores of first frame to infinity
-                scores[:token_per_frame_num] = float('inf')
+                # scores[:token_per_frame_num] = float('inf')
 
                 # columns of specials: [s, s+1, ..., s+n_special-1] for every s in frame_starts
                 # specials = (start_frame_indices[:, None] + torch.arange(patch_start_idx, device=device)).flatten()
