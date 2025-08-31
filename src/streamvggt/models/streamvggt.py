@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin
 from torch.optim import rmsprop  # used for model hub
+import torch.nn.functional as F
 
 from streamvggt.models.aggregator import Aggregator
 from streamvggt.heads.camera_head import CameraHead
@@ -123,21 +124,23 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 aggregated_tokens, patch_start_idx, past_key_values, attn_maps_global_layers = aggregator_output
                 # attn_maps_global_layers is a list with len=#layers. for each layer we have attention map averaged on heads between current frame tokens and
                 # tokens from previous frames + current frame
+                
                 if i==0:
                     # first frame att = inf to keep all tokens from first frame
                     cum_attn_maps = [torch.full_like(map, float('inf'))  for map in attn_maps_global_layers]
 
                 elif i>0:
+                    tk_rm_num_per_layer = self.compute_layer_alphas(attn_maps_global_layers,len(frames), S=i, L=self.aggregator.depth, temp=0.5, P= 0.1)
+
                     for j, attn_map in enumerate(attn_maps_global_layers):
                         temp = cum_attn_maps[j]
                         cum_attn_maps[j] = attn_map
-                        cum_attn_maps[j] = cum_attn_maps[j][:, :temp.size(1)] + temp
+                        cum_attn_maps[j][:, :temp.size(1)] += temp
                         frame_token_num = attn_map.shape[0]
                         # set special tokens attention to inf
                         cum_attn_maps[j][-1, -frame_token_num:-frame_token_num+patch_start_idx]=float('inf')
                     
-
-                    kv_remove_indices = self.get_remove_indices(cum_attn_maps, S=i, rm_percentage=10)
+                    kv_remove_indices = self.get_remove_indices(cum_attn_maps, i, tk_rm_num_per_layer)
                     past_key_values, keep_idx_list, cum_attn_maps = self.compact_kv_cache_per_layer(past_key_values, kv_remove_indices, cum_attn_maps)
                 
                 del attn_maps_global_layers
@@ -198,59 +201,37 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
         output = StreamVGGTOutput(ress=all_ress, views=processed_frames)
         return output
 
-    def get_remove_indices(self, attn_maps_global_layers, S,  rm_percentage=5, rand_rm= False):
+    def get_remove_indices(self, attn_maps_global_layers, S, tk_rm_num_per_layer, rm_percentage=5, rand_rm= False):
         '''returns a list where item i contains a tensor of indices to evict in layer i'''
-        # dont remove special tokens
-        # dont remove tokens from first frame
-        
-        # attn_maps = torch.stack(attn_maps_global_layers)
-        # attn_maps = attn_maps.sum(dim=1) # shape: [num layer, num cashed tokens]
-        # del attn_maps_global_layers
 
         rm_indices_per_layer=[]
-        for attn_map in attn_maps_global_layers:
+        device = attn_maps_global_layers[0].device
+        num_evicted = 0
+        for attn_map, k in zip(attn_maps_global_layers, tk_rm_num_per_layer):
             token_per_frame_num, all_token_num = attn_map.shape
-            device = attn_map.device
-
             #rm percentage is per layer
-            k = int(all_token_num * (rm_percentage / 100))
-            if rand_rm:
-                #select random indices
-                # flat_indices = torch.randperm(y - x, device=device)[:k] + x
-                flat_indices = torch.randperm(all_token_num - 5, device=device)[:k] + 5
+            # k = int(all_token_num * (rm_percentage / 100))
+            rm_num = k - (token_per_frame_num*(S+1) - all_token_num)
+            if rm_num>0:
+                num_evicted = num_evicted + rm_num
+                if rand_rm:
+                    #select random indices
+                    # flat_indices = torch.randperm(y - x, device=device)[:k] + x
+                    flat_indices = torch.randperm(all_token_num - 5, device=device)[:rm_num] + 5
 
+                else:
+                    # avg on Q dim
+                    scores = attn_map.mean(dim=0).clone()
+                    # avg on iterations per frame
+                    scores = scores / (S+1) #maybe changing it to EMA
+                    # 2. Flatten the tensor and find the k smallest values and their 1D indices
+                    # Using largest=False makes topk find the smallest values.
+                    # We only need the indices, so we can ignore the values with _.
+                    _, flat_indices = torch.topk(scores, rm_num, largest=False)
             else:
-                
-            
-                # avg on Q dim
-                scores = attn_map.mean(dim=0).clone()
-                # avg on iterations per frame
-                scores = scores / (S+1) #maybe changing it to EMA
-                # set scores of first frame to infinity
-                # scores[:token_per_frame_num] = float('inf')
-
-                # columns of specials: [s, s+1, ..., s+n_special-1] for every s in frame_starts
-                # specials = (start_frame_indices[:, None] + torch.arange(patch_start_idx, device=device)).flatten()
-                # specials = specials[(specials >= 0) & (specials < y)].unique()
-
-                # boolean mask over columns
-                # col_mask = torch.zeros(y, dtype=torch.bool, device=device)
-                # col_mask[specials] = True
-
-                # set those columns to +inf for all rows
-                # attn_maps[:, col_mask] = float('inf')
-
-                
-            
-                # 2. Flatten the tensor and find the k smallest values and their 1D indices
-                # Using largest=False makes topk find the smallest values.
-                # We only need the indices, so we can ignore the values with _.
-                _, flat_indices = torch.topk(scores, k, largest=False)
-
-            
-            
+                flat_indices = None
             rm_indices_per_layer.append(flat_indices)
-
+        print(f'num tokens to evict: {num_evicted}')
         return rm_indices_per_layer
 
 
@@ -322,6 +303,34 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
             new_kv_cache.append((K_new, V_new, pos_new))
             keep_idx_list.append(keep_idx)
             new_cum_maps.append(attn_map_new)
-
         return new_kv_cache, keep_idx_list, new_cum_maps
 
+    def compute_layer_alphas(self, attn_maps,len_frames, S, L, P=0.8, epsilon=1e-6, temp=1.0):
+        """
+        Computes inverse-variance softmax layer allocation weights α_l.
+        
+        Args:
+            attn_maps (list of torch.Tensor): each of shape [num_heads, seq_len, seq_len],
+                or with batch dim [batch, num_heads, seq_len, seq_len].
+            epsilon (float): small value to avoid division by zero.
+            temp (float): temperature scale for softmax (optional).
+        
+        Returns:
+            alphas (Tensor): shape [num_layers], normalized weights summing to 1.
+            variances (Tensor): shape [num_layers], raw variance values per layer.
+        """
+        variances = []
+        frame_token_num = attn_maps[0].shape[0]
+        for A in attn_maps:
+            # Compute per-token cumulative attention, e.g., sum over queries (rows)
+            token_sums = A.sum(dim=0)  # or sum(dim=1); shape: [seq_len]
+            # Compute variance across token_sums
+            var = token_sums.var(unbiased=False)  # scalar
+            variances.append(var)
+        
+        variances = torch.stack(variances)  # shape: [num_layers]
+        alphas = F.softmax(-variances / temp, dim=0)
+        total_budget = len_frames* L * frame_token_num
+        tk_rm_num_per_layer = (frame_token_num* (S+1)) - (total_budget * P * alphas)
+
+        return (tk_rm_num_per_layer.int()).tolist()
