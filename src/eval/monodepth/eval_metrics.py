@@ -91,7 +91,7 @@ def get_args_parser():
 
 def main(args):
     if args.eval_dataset == "nyu":
-        depth_pathes = glob.glob("../data/eval/nyu_v2/val/nyu_depths/*.npy")
+        depth_pathes = glob.glob("/data/soroush/StreamVGGT/datasets/nyu_v2/val/nyu_depths/*.npy")
         depth_pathes = sorted(depth_pathes)
         pred_pathes = glob.glob(
             f"{args.output_dir}/*.npy"
@@ -104,7 +104,7 @@ def main(args):
         pred_pathes = sorted(pred_pathes)
         full = len(pred_pathes) > 643
         if full:
-            depth_pathes = glob.glob(f"../data/eval/sintel/training/depth/*/*.dpt")
+            depth_pathes = glob.glob(f"/data/soroush/StreamVGGT/datasets/sintel/training/depth/*/*.dpt")
             depth_pathes = sorted(depth_pathes)
         else:
             seq_list = [
@@ -124,7 +124,7 @@ def main(args):
                 "temple_3",
             ]
             depth_pathes_folder = [
-                f"../data/eval/sintel/training/depth/{seq}" for seq in seq_list
+                f"/data/soroush/StreamVGGT/datasets/sintel/training/depth/{seq}" for seq in seq_list
             ]
             depth_pathes = []
             for depth_pathes_folder_i in depth_pathes_folder:
@@ -133,7 +133,7 @@ def main(args):
     elif args.eval_dataset == "bonn":
         seq_list = ["balloon2", "crowd2", "crowd3", "person_tracking2", "synchronous"]
         img_pathes_folder = [
-            f"../data/eval/bonn/rgbd_bonn_dataset/rgbd_bonn_{seq}/rgb_110/*.png"
+            f"/data/soroush/StreamVGGT/datasets/bonn/rgbd_bonn_dataset/rgbd_bonn_{seq}/rgb_110/*.png"
             for seq in seq_list
         ]
         img_pathes = []
@@ -141,7 +141,7 @@ def main(args):
             img_pathes += glob.glob(img_pathes_folder_i)
         img_pathes = sorted(img_pathes)
         depth_pathes_folder = [
-            f"../data/eval/bonn/rgbd_bonn_dataset/rgbd_bonn_{seq}/depth_110/*.png"
+            f"/data/soroush/StreamVGGT/datasets/bonn/rgbd_bonn_dataset/rgbd_bonn_{seq}/depth_110/*.png"
             for seq in seq_list
         ]
         depth_pathes = []
@@ -154,7 +154,7 @@ def main(args):
         pred_pathes = sorted(pred_pathes)
     elif args.eval_dataset == "kitti":
         depth_pathes = glob.glob(
-            "../data/eval/kitti/depth_selection/val_selection_cropped/groundtruth_depth_gathered/*/*.png"
+            "/data/soroush/StreamVGGT/datasets/kitti/depth_selection/val_selection_cropped/groundtruth_depth_gathered/*/*.png"
         )
         depth_pathes = sorted(depth_pathes)
         pred_pathes = glob.glob(

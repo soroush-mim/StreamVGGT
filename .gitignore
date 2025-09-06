@@ -12,3 +12,11 @@ attention_plots_frame_level/*
 attention_plots/*
 attention_plots_layer_averaged/*
 attention_plots_scaled/*
+eval_results/*/*/*/*
+eval_results/mv_recon/runs.zip
+src/eval/mv_recon/dataset_utils/__pycache__/__init__.cpython-311.pyc
+src/eval/mv_recon/dataset_utils/__pycache__/cropping.cpython-311.pyc
+src/eval/mv_recon/dataset_utils/__pycache__/transforms.cpython-311.pyc
+src/eval/mv_recon/dataset_utils/__pycache__/__init__.cpython-311.pyc
+src/eval/mv_recon/dataset_utils/__pycache__/cropping.cpython-311.pyc
+src/eval/mv_recon/dataset_utils/__pycache__/transforms.cpython-311.pyc

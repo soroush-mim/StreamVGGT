@@ -76,6 +76,9 @@ def loss_of_one_batch(
     ret=None,
     img_mask=None,
     inference=False,
+    evicion=False,
+    P=0.8,
+    temp=0.5,
 ):
     if len(batch) > 2:
         assert (
@@ -91,7 +94,10 @@ def loss_of_one_batch(
     with torch.cuda.amp.autocast(dtype=dtype):
         if inference:
             with torch.no_grad():
-                output = model.inference(batch, query_pts)
+                if evicion:
+                    output = model.inference(batch, query_pts, evicion=evicion, P=P, temp=temp)
+                else:
+                    output = model.inference(batch, query_pts)
                 preds, batch = output.ress, output.views
                 result = dict(views=batch, pred=preds)
                 return result[ret] if ret else result

@@ -104,7 +104,7 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 ress.append(res)
             return StreamVGGTOutput(ress=ress, views=views)  # [S] [B, C, H, W]
         
-    def inference(self, frames, query_points: torch.Tensor = None, past_key_values=None):        
+    def inference(self, frames, query_points: torch.Tensor = None, past_key_values=None, eviction=True, P=0.8, temp=0.5):        
         past_key_values = [None] * self.aggregator.depth
         past_key_values_camera = [None] * self.camera_head.trunk_depth
         
@@ -124,32 +124,33 @@ class StreamVGGT(nn.Module, PyTorchModelHubMixin):
                 aggregated_tokens, patch_start_idx, past_key_values, attn_maps_global_layers = aggregator_output
                 # attn_maps_global_layers is a list with len=#layers. for each layer we have attention map averaged on heads between current frame tokens and
                 # tokens from previous frames + current frame
-                
-                if i==0:
-                    # first frame att = inf to keep all tokens from first frame
-                    cum_attn_maps = [torch.full_like(map, float('inf'))  for map in attn_maps_global_layers]
+                if eviction:
+                    print('eviction is ON with P: ', P)
+                    if i==0:
+                        # first frame att = inf to keep all tokens from first frame
+                        cum_attn_maps = [torch.full_like(map, float('inf'))  for map in attn_maps_global_layers]
 
-                elif i>0:
-                    tk_rm_num_per_layer = self.compute_layer_alphas(attn_maps_global_layers,len(frames), S=i, L=self.aggregator.depth, temp=0.5, P= 0.1)
+                    elif i>0:
+                        tk_rm_num_per_layer = self.compute_layer_alphas(attn_maps_global_layers,len(frames), S=i, L=self.aggregator.depth, temp=temp, P=P)
 
-                    for j, attn_map in enumerate(attn_maps_global_layers):
-                        temp = cum_attn_maps[j]
-                        cum_attn_maps[j] = attn_map
-                        cum_attn_maps[j][:, :temp.size(1)] += temp
-                        frame_token_num = attn_map.shape[0]
-                        # set special tokens attention to inf
-                        cum_attn_maps[j][-1, -frame_token_num:-frame_token_num+patch_start_idx]=float('inf')
-                    
-                    kv_remove_indices = self.get_remove_indices(cum_attn_maps, i, tk_rm_num_per_layer)
-                    past_key_values, keep_idx_list, cum_attn_maps = self.compact_kv_cache_per_layer(past_key_values, kv_remove_indices, cum_attn_maps)
+                        for j, attn_map in enumerate(attn_maps_global_layers):
+                            t = cum_attn_maps[j]
+                            cum_attn_maps[j] = attn_map
+                            cum_attn_maps[j][:, :t.size(1)] += t
+                            frame_token_num = attn_map.shape[0]
+                            # set special tokens attention to inf
+                            cum_attn_maps[j][-1, -frame_token_num:-frame_token_num+patch_start_idx]=float('inf')
+                        
+                        kv_remove_indices = self.get_remove_indices(cum_attn_maps, i, tk_rm_num_per_layer)
+                        past_key_values, keep_idx_list, cum_attn_maps = self.compact_kv_cache_per_layer(past_key_values, kv_remove_indices, cum_attn_maps)
                 
                 del attn_maps_global_layers
-                kv_cache_mem = 0
-                for kv_cache in past_key_values:
-                    for cashe in kv_cache:
-                        kv_cache_mem = kv_cache_mem + (cashe.numel() * cashe.element_size())
-                print(f"GPU RAM usage of kv cashe in iteration {i}: {kv_cache_mem} bytes")
-                print(f"k cashe shape for each layer in iteration {i}: {past_key_values[0][0].shape} bytes")
+                # kv_cache_mem = 0
+                # for kv_cache in past_key_values:
+                #     for cashe in kv_cache:
+                #         kv_cache_mem = kv_cache_mem + (cashe.numel() * cashe.element_size())
+                # print(f"GPU RAM usage of kv cashe in iteration {i}: {kv_cache_mem} bytes")
+                # print(f"k cashe shape for each layer in iteration {i}: {past_key_values[0][0].shape} bytes")
             else:
                 aggregated_tokens, patch_start_idx = aggregator_output
             

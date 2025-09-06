@@ -41,6 +41,9 @@ def get_args_parser():
     parser.add_argument("--revisit", type=int, default=1, help="revisit times")
     parser.add_argument("--freeze", action="store_true")
     parser.add_argument("--use_proj", action="store_true")
+    parser.add_argument("--eviction", action="store_true")
+    parser.add_argument("--P", type=float, default=0.8)
+    parser.add_argument("--temp", type=float, default=0.5)
     return parser
 
 
@@ -61,7 +64,7 @@ def main(args):
     datasets_all = {
         "7scenes": SevenScenes(
             split="test",
-            ROOT="../data/eval/7scenes",
+            ROOT="/data/soroush/StreamVGGT/datasets/7scenes",
             resolution=resolution,
             num_seq=1,
             full_video=True,
@@ -69,7 +72,7 @@ def main(args):
         ),  # 20),
         "NRGBD": NRGBD(
             split="test",
-            ROOT="../data/eval/neural_rgbd",
+            ROOT="/data/soroush/StreamVGGT/datasets/RGBD",
             resolution=resolution,
             num_seq=1,
             full_video=True,
@@ -111,9 +114,10 @@ def main(args):
     os.makedirs(args.output_dir, exist_ok=True)
 
     criterion = Regr3D_t_ScaleShiftInv(L21, norm_mode=False, gt_scale=True)
-
+    
     with torch.no_grad():
         for name_data, dataset in datasets_all.items():
+            torch.cuda.reset_peak_memory_stats()
             save_path = osp.join(args.output_dir, name_data)
             os.makedirs(save_path, exist_ok=True)
             log_file = osp.join(save_path, f"logs_{accelerator.process_index}.txt")
@@ -127,9 +131,9 @@ def main(args):
             nc2_all = 0
             nc2_all_med = 0
 
-            fps_all = []
-            time_all = []
 
+            run_time = 0
+            frame_num = 0
             with accelerator.split_between_processes(list(range(len(dataset)))) as idxs:
                 for data_idx in tqdm(idxs):
                     batch = default_collate([dataset[data_idx]])
@@ -198,9 +202,12 @@ def main(args):
 
                         with torch.cuda.amp.autocast(dtype=dtype):
                             with torch.no_grad():
-                                results = model.inference(batch)
-
-                            preds, batch = results.ress, results.views 
+                                start = time.time()
+                                results = model.inference(batch, eviction=args.eviction, P=args.P, temp=args.temp)
+                                end = time.time()
+                            preds, batch = results.ress, results.views
+                            frame_num += len(batch)
+                            run_time += (end - start)
 
                             if args.use_proj:
                                 pose_enc = torch.stack([preds[s]["camera_pose"] for s in range(len(preds))], dim=1)
@@ -287,10 +294,10 @@ def main(args):
                     save_params["pts_gt_all"] = pts_gt_all
                     save_params["masks_all"] = masks_all
 
-                    np.save(
-                        os.path.join(save_path, f"{scene_id.replace('/', '_')}.npy"),
-                        save_params,
-                    )
+                    # np.save(
+                    #     os.path.join(save_path, f"{scene_id.replace('/', '_')}.npy"),
+                    #     save_params,
+                    # )
 
                     if "DTU" in name_data:
                         threshold = 100
@@ -350,12 +357,12 @@ def main(args):
                     pcd.colors = o3d.utility.Vector3dVector(
                         images_all_masked.reshape(-1, 3)
                     )
-                    o3d.io.write_point_cloud(
-                        os.path.join(
-                            save_path, f"{scene_id.replace('/', '_')}-mask.ply"
-                        ),
-                        pcd,
-                    )
+                    # o3d.io.write_point_cloud(
+                    #     os.path.join(
+                    #         save_path, f"{scene_id.replace('/', '_')}-mask.ply"
+                    #     ),
+                    #     pcd,
+                    # )
 
                     pcd_gt = o3d.geometry.PointCloud()
                     pcd_gt.points = o3d.utility.Vector3dVector(
@@ -364,10 +371,10 @@ def main(args):
                     pcd_gt.colors = o3d.utility.Vector3dVector(
                         images_all_masked.reshape(-1, 3)
                     )
-                    o3d.io.write_point_cloud(
-                        os.path.join(save_path, f"{scene_id.replace('/', '_')}-gt.ply"),
-                        pcd_gt,
-                    )
+                    # o3d.io.write_point_cloud(
+                    #     os.path.join(save_path, f"{scene_id.replace('/', '_')}-gt.ply"),
+                    #     pcd_gt,
+                    # )
 
                     trans_init = np.eye(4)
 
@@ -383,12 +390,12 @@ def main(args):
 
                     pcd = pcd.transform(transformation)
 
-                    o3d.io.write_point_cloud(
-                        os.path.join(
-                            save_path, f"{scene_id.replace('/', '_')}-mask_align.ply"
-                        ),
-                        pcd,
-                    )
+                    # o3d.io.write_point_cloud(
+                    #     os.path.join(
+                    #         save_path, f"{scene_id.replace('/', '_')}-mask_align.ply"
+                    #     ),
+                    #     pcd,
+                    # )
 
                     pcd.estimate_normals()
                     pcd_gt.estimate_normals()
@@ -424,6 +431,7 @@ def main(args):
                     torch.cuda.empty_cache()
 
             accelerator.wait_for_everyone()
+            whole_run_peak = torch.cuda.max_memory_allocated()
             # Get depth from pcd and run TSDFusion
             if accelerator.is_main_process:
                 to_write = ""
@@ -463,6 +471,10 @@ def main(args):
                         print_str = print_str + f"{m_name}: {print_num:.3f} | "
                     print_str = print_str + "\n"
                     f.write(to_write + print_str)
+                    f.write("\n")
+                    f.write(f"fps= {run_time/frame_num}")
+                    f.write("\n")
+                    f.write(f"[MEM] whole-run peak allocated = {whole_run_peak/1024**3:.2f} GB")
 
 
 
@@ -487,5 +499,6 @@ regex = re.compile(pattern, re.VERBOSE)
 if __name__ == "__main__":
     parser = get_args_parser()
     args = parser.parse_args()
+    print('args: ', args)
 
     main(args)

@@ -36,6 +36,9 @@ def get_args_parser():
     parser.add_argument(
         "--eval_dataset", type=str, default="nyu", choices=list(dataset_metadata.keys())
     )
+    parser.add_argument("--eviction", action="store_true")
+    parser.add_argument("--P", type=float, default=0.8)
+    parser.add_argument("--temp", type=float, default=0.5)
     return parser
 
 
@@ -97,7 +100,7 @@ def eval_mono_depth(args, model, device, filelist, save_dir=None):
             views.append(view)
         for view in views:
             view['img'] = (view['img'] + 1.0) / 2.0
-        outputs = loss_of_one_batch(views, model, device, None, inference=True)
+        outputs = loss_of_one_batch(views, model, device, None, inference=True, eviction=args.eviction, P=args.P, temp=args.temp)
         pts3ds_self = [output["depth"].cpu() for output in outputs["pred"]]
         depth_map = pts3ds_self[0][..., -1].mean(dim=0)
 
@@ -125,6 +128,7 @@ if __name__ == "__main__":
         args.full_seq = True
     else:
         args.full_seq = False
+    print('args: ', args)
     add_path_to_dust3r(args.weights)
     from dust3r.utils.image import load_images_for_eval as load_images
     from dust3r.inference import loss_of_one_batch

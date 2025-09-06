@@ -21,7 +21,7 @@ dataset_metadata = {
         "process_func": None,  # Not used in mono depth estimation
     },
     "kitti": {
-        "img_path": "../data/eval/kitti/depth_selection/val_selection_cropped/image_gathered",  # Default path
+        "img_path": "/data/soroush/StreamVGGT/datasets/kitti/depth_selection/val_selection_cropped/image_gathered",  # Default path
         "mask_path": None,
         "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq),
         "gt_traj_func": lambda img_path, anno_path, seq: None,
@@ -33,7 +33,7 @@ dataset_metadata = {
         "process_func": lambda args, img_path: process_kitti(args, img_path),
     },
     "bonn": {
-        "img_path": "../data/eval/bonn/rgbd_bonn_dataset",
+        "img_path": "/data/soroush/StreamVGGT/datasets/bonn/rgbd_bonn_dataset",
         "mask_path": None,
         "dir_path_func": lambda img_path, seq: os.path.join(
             img_path, f"rgbd_bonn_{seq}", "rgb_110"
@@ -49,7 +49,7 @@ dataset_metadata = {
         "process_func": lambda args, img_path: process_bonn(args, img_path),
     },
     "nyu": {
-        "img_path": "../data/eval/nyu_v2/val/nyu_images",
+        "img_path": "/data/soroush/StreamVGGT/datasets/nyu_v2/val/nyu_images",
         "mask_path": None,
         "process_func": lambda args, img_path: process_nyu(args, img_path),
     },
@@ -82,8 +82,8 @@ dataset_metadata = {
         "process_func": None,
     },
     "sintel": {
-        "img_path": "../data/eval/sintel/training/final",
-        "anno_path": "../data/eval/sintel/training/camdata_left",
+        "img_path": "/data/soroush/StreamVGGT/datasets/sintel/training/final",
+        "anno_path": "/data/soroush/StreamVGGT/datasets/sintel/training/camdata_left",
         "mask_path": None,
         "dir_path_func": lambda img_path, seq: os.path.join(img_path, seq),
         "gt_traj_func": lambda img_path, anno_path, seq: os.path.join(anno_path, seq),

@@ -138,7 +138,7 @@ def eval_pose_estimation_dist(args, model, img_path, save_dir=None, mask_path=No
                 for view in views:
                     view["img"] = (view["img"] + 1.0) / 2.0
                 start = time.time()
-                outputs = loss_of_one_batch(views, model, None, None, inference=True)
+                outputs = loss_of_one_batch(views, model, None, None, inference=True, eviction=args.eviction, P=args.P, temp=args.temp)
                 end = time.time()
                 # fps = len(filelist) / (end - start)
                 with torch.cuda.amp.autocast(dtype=torch.float32):

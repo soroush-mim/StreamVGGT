@@ -230,7 +230,7 @@ def set_random_seeds(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def process_sequence(model, seq_name, seq_data, category, co3d_dir, min_num_images, num_frames, use_ba, device, dtype):
+def process_sequence(model, seq_name, seq_data, category, co3d_dir, min_num_images, num_frames, use_ba, device, dtype, eviction=False, P=0.8, temp=0.5):
     """
     Process a single sequence and compute pose errors.
 
@@ -281,7 +281,7 @@ def process_sequence(model, seq_name, seq_data, category, co3d_dir, min_num_imag
     dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
     with torch.no_grad():
         with torch.cuda.amp.autocast(dtype=dtype):
-            output = model.inference(batch)
+            output = model.inference(batch, evicion=eviction, P=P, temp=temp)
             predictions = output.ress
         with torch.cuda.amp.autocast(dtype=torch.float64):
             pose_enc = torch.stack([predictions[s]["camera_pose"] for s in range(len(predictions))], dim=1)
@@ -374,6 +374,7 @@ def main():
             seq_rError, seq_tError = process_sequence(
                 model, seq_name, seq_data, category, args.co3d_dir,
                 args.min_num_images, args.num_frames, args.use_ba, device, dtype,
+                args.eviction, args.P, args.temp
             )
 
             print("-" * 50)
